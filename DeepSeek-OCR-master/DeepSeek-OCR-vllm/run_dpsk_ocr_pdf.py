@@ -1,3 +1,4 @@
+
 import os
 import fitz
 import img2pdf
@@ -6,11 +7,11 @@ import re
 from tqdm import tqdm
 import torch
 from concurrent.futures import ThreadPoolExecutor
- 
+
 
 if torch.version.cuda == '11.8':
     os.environ["TRITON_PTXAS_PATH"] = "/usr/local/cuda-11.8/bin/ptxas"
-os.environ['VLLM_USE_V1'] = '0'
+os.environ['VLLM_USE_V1'] = '1'
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 
@@ -23,7 +24,8 @@ from deepseek_ocr import DeepseekOCRForCausalLM
 from vllm.model_executor.models.registry import ModelRegistry
 
 from vllm import LLM, SamplingParams
-from process.ngram_norepeat import NoRepeatNGramLogitsProcessor
+# NOTE: VLLM V1 does not support per-request logits processors
+# from process.ngram_norepeat import NoRepeatNGramLogitsProcessor
 from process.image_process import DeepseekOCRProcessor
 
 ModelRegistry.register_model("DeepseekOCRForCausalLM", DeepseekOCRForCausalLM)
@@ -34,7 +36,7 @@ llm = LLM(
     hf_overrides={"architectures": ["DeepseekOCRForCausalLM"]},
     block_size=256,
     enforce_eager=False,
-    trust_remote_code=True, 
+    trust_remote_code=True,
     max_model_len=8192,
     swap_space=0,
     max_num_seqs=MAX_CONCURRENCY,
@@ -43,12 +45,15 @@ llm = LLM(
     disable_mm_preprocessor_cache=True
 )
 
-logits_processors = [NoRepeatNGramLogitsProcessor(ngram_size=20, window_size=50, whitelist_token_ids= {128821, 128822})] #window for fast；whitelist_token_ids: <td>,</td>
+# NOTE: VLLM V1 does not support per-request logits processors
+# Using repetition_penalty as an alternative to NoRepeatNGramLogitsProcessor
+# logits_processors = [NoRepeatNGramLogitsProcessor(ngram_size=20, window_size=50, whitelist_token_ids= {128821, 128822})]
 
 sampling_params = SamplingParams(
     temperature=0.0,
     max_tokens=8192,
-    logits_processors=logits_processors,
+    # NOTE: Using repetition_penalty instead of custom logits processor for V1 compatibility
+    repetition_penalty=1.05,  # Slight penalty to discourage repetition
     skip_special_tokens=False,
     include_stop_str_in_output=True,
 )
@@ -59,19 +64,19 @@ class Colors:
     GREEN = '\033[32m'
     YELLOW = '\033[33m'
     BLUE = '\033[34m'
-    RESET = '\033[0m' 
+    RESET = '\033[0m'
 
 def pdf_to_images_high_quality(pdf_path, dpi=144, image_format="PNG"):
     """
     pdf2images
     """
     images = []
-    
+
     pdf_document = fitz.open(pdf_path)
-    
+
     zoom = dpi / 72.0
     matrix = fitz.Matrix(zoom, zoom)
-    
+
     for page_num in range(pdf_document.page_count):
         page = pdf_document[page_num]
 
@@ -88,9 +93,9 @@ def pdf_to_images_high_quality(pdf_path, dpi=144, image_format="PNG"):
                 background = Image.new('RGB', img.size, (255, 255, 255))
                 background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
                 img = background
-        
+
         images.append(img)
-    
+
     pdf_document.close()
     return images
 
@@ -98,18 +103,18 @@ def pil_to_pdf_img2pdf(pil_images, output_path):
 
     if not pil_images:
         return
-    
+
     image_bytes_list = []
-    
+
     for img in pil_images:
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        
+
         img_buffer = io.BytesIO()
         img.save(img_buffer, format='JPEG', quality=95)
         img_bytes = img_buffer.getvalue()
         image_bytes_list.append(img_bytes)
-    
+
     try:
         pdf_bytes = img2pdf.convert(image_bytes_list)
         with open(output_path, "wb") as f:
@@ -156,18 +161,18 @@ def draw_bounding_boxes(image, refs, jdx):
 
     overlay = Image.new('RGBA', img_draw.size, (0, 0, 0, 0))
     draw2 = ImageDraw.Draw(overlay)
-    
+
     #     except IOError:
     font = ImageFont.load_default()
 
     img_idx = 0
-    
+
     for i, ref in enumerate(refs):
         try:
             result = extract_coordinates_and_label(ref, image_width, image_height)
             if result:
                 label_type, points_list = result
-                
+
                 color = (np.random.randint(0, 200), np.random.randint(0, 200), np.random.randint(0, 255))
 
                 color_a = color + (20, )
@@ -188,7 +193,7 @@ def draw_bounding_boxes(image, refs, jdx):
                             print(e)
                             pass
                         img_idx += 1
-                        
+
                     try:
                         if label_type == 'title':
                             draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
@@ -199,13 +204,13 @@ def draw_bounding_boxes(image, refs, jdx):
 
                         text_x = x1
                         text_y = max(0, y1 - 15)
-                            
+
                         text_bbox = draw.textbbox((0, 0), label_type, font=font)
                         text_width = text_bbox[2] - text_bbox[0]
                         text_height = text_bbox[3] - text_bbox[1]
-                        draw.rectangle([text_x, text_y, text_x + text_width, text_y + text_height], 
+                        draw.rectangle([text_x, text_y, text_x + text_width, text_y + text_height],
                                     fill=(255, 255, 255, 30))
-                        
+
                         draw.text((text_x, text_y), label_type, font=font, fill=color)
                     except:
                         pass
@@ -234,7 +239,7 @@ if __name__ == "__main__":
 
     os.makedirs(OUTPUT_PATH, exist_ok=True)
     os.makedirs(f'{OUTPUT_PATH}/images', exist_ok=True)
-    
+
     print(f'{Colors.RED}PDF loading .....{Colors.RESET}')
 
 
@@ -245,7 +250,7 @@ if __name__ == "__main__":
 
     # batch_inputs = []
 
-    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:  
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         batch_inputs = list(tqdm(
             executor.map(process_single_image, images),
             total=len(images),
@@ -292,7 +297,7 @@ if __name__ == "__main__":
             if SKIP_REPEAT:
                 continue
 
-        
+
         page_num = f'\n<--- Page Split --->'
 
         contents_det += content + f'\n{page_num}\n'
